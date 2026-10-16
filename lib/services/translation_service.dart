@@ -10,7 +10,9 @@ class TranslationService {
 
   TranslationService._();
 
-  static const String _backendUrl = 'http://127.0.0.1:8000';
+  //static const String _backendUrl = 'http://127.0.0.1:8000';
+
+  static const String _backendUrl ='https://orca-app-nrgio.ondigitalocean.app';
 
   final OnDeviceTranslatorModelManager _modelManager =
       OnDeviceTranslatorModelManager();
