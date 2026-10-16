@@ -1,0 +1,166 @@
+
+package com.example.myspeak
+
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.util.Log
+import androidx.core.content.ContextCompat
+import java.util.Calendar
+
+class ReminderAlarmReceiver : BroadcastReceiver() {
+
+    override fun onReceive(context: Context, intent: Intent) {
+
+        val message = intent.getStringExtra("message")
+            ?: "Time for your reminder"
+
+        val reminderId = intent.getIntExtra("reminderId", -1)
+        val repeat = intent.getStringExtra("repeat") ?: "Once"
+
+        Log.i("MySpeakAlarm", "Alarm triggered: $message")
+
+        if (reminderId >= 0) {
+    if (repeat == "Daily" || repeat == "Weekdays") {
+        scheduleNextDailyAlarm(context, intent, reminderId)
+    } else {
+        try {
+            ReminderScheduleStore.removeReminder(
+                context = context,
+                reminderId = reminderId
+            )
+            Log.i(
+                "MySpeakAlarm",
+                "Completed Once reminder removed from native storage"
+            )
+        } catch (e: Exception) {
+            Log.e(
+                "MySpeakAlarm",
+                "Unable to remove completed Once reminder",
+                e
+            )
+        }
+    }
+}
+
+        val serviceIntent = Intent(
+            context,
+            ReminderSpeechService::class.java
+        ).apply {
+            putExtra("message", message)
+            putExtra("announcementCount",intent.getIntExtra("announcementCount", 1).coerceIn(1, 4))
+            putExtra("language", intent.getStringExtra("language") ?: "English")
+        }
+
+        try {
+            ContextCompat.startForegroundService(
+                context,
+                serviceIntent
+            )
+
+            Log.i(
+                "MySpeakAlarm",
+                "Speech service start requested"
+            )
+
+        } catch (e: Exception) {
+            Log.e(
+                "MySpeakAlarm",
+                "Unable to start speech service",
+                e
+            )
+        }
+    }
+
+    private fun scheduleNextDailyAlarm(
+        context: Context,
+        originalIntent: Intent,
+        reminderId: Int
+    ) {
+        val alarmManager =
+            context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            !alarmManager.canScheduleExactAlarms()
+        ) {
+            Log.e("MySpeakAlarm", "Exact alarm permission unavailable")
+            return
+        }
+
+        val scheduledHour = originalIntent.getIntExtra("hour", -1)
+        val scheduledMinute = originalIntent.getIntExtra("minute", -1)
+
+        val calendar = Calendar.getInstance()
+
+        if (scheduledHour in 0..23 && scheduledMinute in 0..59) {
+            calendar.set(Calendar.HOUR_OF_DAY, scheduledHour)
+            calendar.set(Calendar.MINUTE, scheduledMinute)
+            calendar.set(Calendar.SECOND, 0)
+            calendar.set(Calendar.MILLISECOND, 0)
+        }
+
+        calendar.add(Calendar.DAY_OF_YEAR, 1)
+
+        val repeat = originalIntent.getStringExtra("repeat") ?: "Once"
+
+        if (repeat == "Weekdays") {
+            while (
+                calendar.get(Calendar.DAY_OF_WEEK) == Calendar.SATURDAY ||
+                calendar.get(Calendar.DAY_OF_WEEK) == Calendar.SUNDAY
+            ) {
+                calendar.add(Calendar.DAY_OF_YEAR, 1)
+            }
+        }
+
+        val nextTime = calendar.timeInMillis
+
+        val nextIntent = Intent(
+            context,
+            ReminderAlarmReceiver::class.java
+        ).apply {
+            putExtra(
+                "message",
+                originalIntent.getStringExtra("message")
+            )
+
+            putExtra("reminderId", reminderId)
+            putExtra("repeat", repeat)
+            putExtra("hour", originalIntent.getIntExtra("hour", -1))
+            putExtra("minute", originalIntent.getIntExtra("minute", -1))
+            putExtra("language", originalIntent.getStringExtra("language") ?: "English")
+            putExtra("announcementCount",originalIntent.getIntExtra("announcementCount", 1).coerceIn(1, 4))
+            
+        }
+
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            reminderId,
+            nextIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                PendingIntent.FLAG_IMMUTABLE
+        )
+
+        try {
+            alarmManager.setExactAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                nextTime,
+                pendingIntent
+            )
+
+            Log.i(
+                "MySpeakAlarm",
+                "Next daily alarm scheduled for $nextTime"
+            )
+
+        } catch (e: SecurityException) {
+            Log.e(
+                "MySpeakAlarm",
+                "Failed to schedule next daily alarm",
+                e
+            )
+        }
+    }
+}

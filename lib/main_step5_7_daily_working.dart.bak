@@ -1,0 +1,494 @@
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:flutter/material.dart';
+import 'models/reminder.dart';
+import 'services/reminder_database.dart';
+import 'screens/saved_reminders_screen.dart';
+import 'package:flutter/services.dart';
+
+
+void main() {
+  runApp(const PersonalVoiceReminderApp());
+}
+
+class PersonalVoiceReminderApp extends StatelessWidget {
+  const PersonalVoiceReminderApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Personal Voice Reminder',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
+        useMaterial3: true,
+      ),
+      home: const CreateReminderScreen(),
+    );
+  }
+}
+
+class CreateReminderScreen extends StatefulWidget {
+  const CreateReminderScreen({super.key});
+
+  @override
+  State<CreateReminderScreen> createState() =>
+      _CreateReminderScreenState();
+}
+
+class _CreateReminderScreenState extends State<CreateReminderScreen> {
+  final TextEditingController _messageController =
+      TextEditingController();
+
+  final FlutterTts _flutterTts = FlutterTts();
+
+  TimeOfDay _selectedTime = const TimeOfDay(hour: 8, minute: 0);
+  String _selectedLanguage = 'English';
+  String _repeat = 'Daily';
+  String _playbackMode = 'Automatic Voice';
+
+  Future<void> _selectTime() async {
+    final selected = await showTimePicker(
+      context: context,
+      initialTime: _selectedTime,
+    );
+
+    if (selected != null) {
+      setState(() => _selectedTime = selected);
+    }
+  }
+
+Future<void> _scheduleTestAlarm() async {
+  const channel = MethodChannel('com.example.myspeak/reminders');
+
+  try {
+    final response =
+        await channel.invokeMethod<String>('scheduleTestAlarm');
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(response ?? 'Alarm scheduled'),
+      ),
+    );
+  } catch (error) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Alarm scheduling failed: $error'),
+      ),
+    );
+  }
+}
+
+Future<void> _checkExactAlarmPermission() async {
+  const channel = MethodChannel('com.example.myspeak/reminders');
+
+  try {
+    final bool allowed =
+        await channel.invokeMethod<bool>('canScheduleExactAlarms') ?? false;
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          allowed
+              ? 'Exact Alarm Permission: ALLOWED'
+              : 'Exact Alarm Permission: NOT ALLOWED',
+        ),
+      ),
+    );
+  } catch (error) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Permission check failed: $error')),
+    );
+  }
+}
+
+
+Future<void> _testAndroidBridge() async {
+  const channel = MethodChannel('com.example.myspeak/reminders');
+
+  try {
+    final response =
+        await channel.invokeMethod<String>('checkScheduler');
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(response ?? 'No response from Android'),
+      ),
+    );
+  } catch (error) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Android bridge error: $error'),
+      ),
+    );
+  }
+}
+
+
+// Additional methods for scheduling reminders, saving reminders, and previewing voice will be added here.
+Future<void> _scheduleSavedReminder({
+  required int reminderId,
+  required String message,
+  required DateTime scheduledTime,
+   required String repeat,
+   required int hour,
+  required int minute,
+}) async {
+  const channel = MethodChannel('com.example.myspeak/reminders');
+
+  final response = await channel.invokeMethod<String>(
+    'scheduleReminder',
+    {
+      'reminderId': reminderId,
+      'message': message,
+      'triggerTime': scheduledTime.millisecondsSinceEpoch,
+      'repeat': repeat,
+      'hour': hour,
+      'minute': minute,
+    },
+  );
+
+  debugPrint('MySpeak scheduling response: $response');
+}
+
+  
+Future<void> _saveReminder() async {
+  final message = _messageController.text.trim();
+
+  if (message.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Please enter a reminder message'),
+      ),
+    );
+    return;
+  }
+
+  final reminder = Reminder(
+    message: message,
+    hour: _selectedTime.hour,
+    minute: _selectedTime.minute,
+    language: _selectedLanguage,
+    repeat: _repeat,
+    playbackMode: _playbackMode,
+  );
+
+  try {
+    final id = await ReminderDatabase.instance.insertReminder(reminder);
+
+    
+if (_repeat == 'Once' || _repeat == 'Daily') {
+  final now = DateTime.now();
+
+  var scheduledTime = DateTime(
+    now.year,
+    now.month,
+    now.day,
+    _selectedTime.hour,
+    _selectedTime.minute,
+  );
+
+  // A one-time reminder must be scheduled in the future.
+  // If today's selected time has passed, use tomorrow.
+  if (!scheduledTime.isAfter(now)) {
+    scheduledTime = scheduledTime.add(
+      const Duration(days: 1),
+    );
+  }
+
+  try {
+    await _scheduleSavedReminder(
+      reminderId: id,
+      message: _messageController.text.trim(),
+      scheduledTime: scheduledTime,
+      repeat: _repeat,
+      hour: _selectedTime.hour,
+      minute: _selectedTime.minute,
+    );
+
+    debugPrint(
+      'MySpeak: Reminder #$id scheduled for $scheduledTime',
+    );
+  } catch (error) {
+    debugPrint(
+      'MySpeak: Reminder #$id saved but scheduling failed: $error',
+    );
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Reminder saved, but Android scheduling failed: $error',
+        ),
+      ),
+    );
+
+    return;
+  }
+}
+
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Reminder #$id saved successfully!'),
+      ),
+    );
+
+    _messageController.clear();
+  } catch (error) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Unable to save reminder: $error'),
+      ),
+    );
+  }
+}
+
+
+Future<void> _previewVoice() async {
+  final message = _messageController.text.trim();
+
+  if (message.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Please enter a reminder message')),
+    );
+    return;
+  }
+
+  final languageCodes = {
+    'English': 'en-IN',
+    'Telugu': 'te-IN',
+    'Hindi': 'hi-IN',
+  };
+
+  final languageCode = languageCodes[_selectedLanguage] ?? 'en-IN';
+
+  try {
+    final supported =
+        await _flutterTts.isLanguageAvailable(languageCode);
+
+    if (supported != true) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Voice for $_selectedLanguage is not available. '
+            'Install it in Android Text-to-Speech settings.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    await _flutterTts.setLanguage(languageCode);
+    await _flutterTts.setSpeechRate(0.5);
+    await _flutterTts.setPitch(1.0);
+    await _flutterTts.speak(message);
+  } catch (error) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Voice preview failed: $error')),
+    );
+  }
+}
+
+
+
+  @override
+  void dispose() {
+     _flutterTts.stop();
+    _messageController.dispose();
+    super.dispose();
+}
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Personal Voice Reminder'),
+        backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Icon(
+                Icons.record_voice_over,
+                size: 64,
+                color: Colors.indigo,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Create Voice Reminder',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 24),
+
+              TextField(
+                controller: _messageController,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  labelText: 'Reminder Message',
+                  hintText: 'Please take your morning medicine',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.access_time),
+                  title: const Text('Reminder Time'),
+                  subtitle: Text(_selectedTime.format(context)),
+                  trailing: const Icon(Icons.edit),
+                  onTap: _selectTime,
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              DropdownButtonFormField<String>(
+                initialValue: _selectedLanguage,
+                decoration: const InputDecoration(
+                  labelText: 'Voice Language',
+                  border: OutlineInputBorder(),
+                ),
+                items: ['English', 'Telugu', 'Hindi']
+                    .map(
+                      (language) => DropdownMenuItem(
+                        value: language,
+                        child: Text(language),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  if (value != null) {
+                    setState(() => _selectedLanguage = value);
+                  }
+                },
+              ),
+
+              const SizedBox(height: 16),
+
+              DropdownButtonFormField<String>(
+                initialValue: _repeat,
+                decoration: const InputDecoration(
+                  labelText: 'Repeat',
+                  border: OutlineInputBorder(),
+                ),
+                items: ['Once', 'Daily', 'Weekdays']
+                    .map(
+                      (repeat) => DropdownMenuItem(
+                        value: repeat,
+                        child: Text(repeat),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  if (value != null) {
+                    setState(() => _repeat = value);
+                  }
+                },
+              ),
+
+              const SizedBox(height: 16),
+
+              DropdownButtonFormField<String>(
+                initialValue: _playbackMode,
+                decoration: const InputDecoration(
+                  labelText: 'Playback Mode',
+                  border: OutlineInputBorder(),
+                ),
+                items: ['Automatic Voice', 'Notification First']
+                    .map(
+                      (mode) => DropdownMenuItem(
+                        value: mode,
+                        child: Text(mode),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  if (value != null) {
+                    setState(() => _playbackMode = value);
+                  }
+                },
+              ),
+
+              const SizedBox(height: 24),
+
+              OutlinedButton.icon(
+                onPressed: _previewVoice,
+                icon: const Icon(Icons.volume_up),
+                label: const Text('Preview Voice'),
+              ),
+
+              ElevatedButton.icon(
+              onPressed: _testAndroidBridge,
+              icon: const Icon(Icons.settings_remote),
+              label: const Text('Test Android Bridge'),
+            ),
+
+            ElevatedButton.icon(
+            onPressed: _checkExactAlarmPermission,
+            icon: const Icon(Icons.alarm),
+            label: const Text('Check Exact Alarm Permission'),
+          ),
+
+          ElevatedButton.icon(
+            onPressed: _scheduleTestAlarm,
+            icon: const Icon(Icons.notifications_active),
+            label: const Text('Schedule Test Alarm (2 Minutes)'),
+          ),
+
+              const SizedBox(height: 12),
+
+              FilledButton.icon(
+                onPressed: _saveReminder,
+                icon: const Icon(Icons.save),
+                label: const Text('Save Reminder'),
+              ),
+              const SizedBox(height: 12),
+
+              OutlinedButton.icon(
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const SavedRemindersScreen(),
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.list_alt),
+                label: const Text('View Saved Reminders'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
