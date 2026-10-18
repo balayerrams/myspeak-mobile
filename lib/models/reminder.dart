@@ -10,6 +10,7 @@ class Reminder {
   final String playbackMode;
   final int announcementCount;
   final bool enabled;
+  final int? scheduledAt; // Epoch milliseconds; primarily for Once reminders
   
 
   Reminder({
@@ -23,6 +24,7 @@ class Reminder {
     required this.playbackMode,
     this.announcementCount = 1,
     this.enabled = true,
+    this.scheduledAt,
   });
 
   Map<String, dynamic> toMap() {
@@ -36,6 +38,7 @@ class Reminder {
       'playback_mode': playbackMode,
       'announcement_count': announcementCount,
       'enabled': enabled ? 1 : 0,
+      'scheduled_at': scheduledAt,
     };
   }
 
@@ -51,6 +54,7 @@ class Reminder {
       playbackMode: map['playback_mode'] as String,
       announcementCount: (map['announcement_count'] as int?) ?? 1,
       enabled: (map['enabled'] as int) == 1,
+      scheduledAt: map['scheduled_at'] as int?,
       
     );
   }

@@ -1,5 +1,5 @@
-
-package com.example.myspeak
+﻿
+package com.balayerrams.myspeak
 
 import android.content.Context
 import org.json.JSONObject
@@ -82,3 +82,4 @@ object ReminderScheduleStore {
         )
     }
 }
+

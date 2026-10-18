@@ -1,11 +1,12 @@
-
-package com.example.myspeak
+﻿
+package com.balayerrams.myspeak
 
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -34,10 +35,35 @@ class MainActivity : FlutterActivity() {
                     val alarmManager =
                         getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
-                    result.success(
+                    val allowed =
+                        Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
                         alarmManager.canScheduleExactAlarms()
-                    )
+
+                    result.success(allowed)
                 }
+                
+                "openExactAlarmSettings" -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    try {
+                        val intent = Intent(
+                            Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM
+                        ).apply {
+                            data = android.net.Uri.parse("package:$packageName")
+                        }
+
+                        startActivity(intent)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error(
+                            "SETTINGS_ERROR",
+                            "Unable to open alarm permission settings",
+                            e.message
+                        )
+                    }
+                } else {
+                    result.success(true)
+                }
+            }
 
                 "scheduleTestAlarm" -> {
                     val alarmManager =
@@ -242,3 +268,4 @@ class MainActivity : FlutterActivity() {
         }
     }
 }
+

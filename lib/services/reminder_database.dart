@@ -19,7 +19,7 @@ class ReminderDatabase {
 
     _database = await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute('''
         CREATE TABLE reminders (
@@ -32,7 +32,8 @@ class ReminderDatabase {
           repeat_type TEXT NOT NULL,
           playback_mode TEXT NOT NULL,
           enabled INTEGER NOT NULL DEFAULT 1,
-          announcement_count INTEGER NOT NULL DEFAULT 1
+          announcement_count INTEGER NOT NULL DEFAULT 1,
+          scheduled_at INTEGER
         )
       ''');
 
@@ -50,6 +51,10 @@ class ReminderDatabase {
           ALTER TABLE reminders
           ADD COLUMN speech_message TEXT
         ''');
+      }
+
+      if (oldVersion < 4) {
+        await db.execute('ALTER TABLE reminders ADD COLUMN scheduled_at INTEGER');
       }
     },
     );
@@ -104,6 +109,7 @@ Future<int> updateReminder(Reminder reminder) async {
       'playback_mode': reminder.playbackMode,
       'enabled': reminder.enabled ? 1 : 0,
       'announcement_count': reminder.announcementCount,
+      'scheduled_at': reminder.scheduledAt,
     },
     where: 'id = ?',
     whereArgs: [reminder.id],

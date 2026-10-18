@@ -1,5 +1,5 @@
-
-package com.example.myspeak
+﻿
+package com.balayerrams.myspeak
 
 import android.app.Service
 import android.content.Intent
@@ -208,3 +208,4 @@ private fun startReminderForeground() {
     super.onDestroy()
     }
 }
+

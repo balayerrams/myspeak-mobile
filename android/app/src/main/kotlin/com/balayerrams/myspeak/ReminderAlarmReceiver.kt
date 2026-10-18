@@ -1,5 +1,5 @@
-
-package com.example.myspeak
+﻿
+package com.balayerrams.myspeak
 
 import android.app.AlarmManager
 import android.app.PendingIntent
@@ -164,3 +164,4 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
         }
     }
 }
+

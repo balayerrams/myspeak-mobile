@@ -81,20 +81,155 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
   String _repeat = 'Daily';
   String _playbackMode = 'Automatic Voice';
   int _announcementCount = 1;
-  int _dashboardRefresh = 0;
+  List<Reminder> _cachedReminders = [];
+  bool _remindersLoaded = false;
+  String? _remindersLoadError;
+
+  
+void _resetReminderForm() {
+  _messageController.clear();
+  _translationController.clear();
+
+  setState(() {
+    _selectedTime = TimeOfDay.now();
+    _selectedLanguage = 'English';
+    _repeat = 'Daily';
+    _playbackMode = 'Automatic Voice';
+    _announcementCount = 1;
+
+    _translatedMessage = null;
+    _translationSourceMessage = null;
+    _translationTargetLanguage = null;
+  });
+}
+
+  Future<void> _reloadReminders() async {
+    try {
+      final reminders = await ReminderDatabase.instance.getReminders();
+      if (!mounted) return;
+      setState(() {
+        _cachedReminders = reminders;
+        _remindersLoaded = true;
+        _remindersLoadError = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _remindersLoaded = true;
+        _remindersLoadError = '$error';
+      });
+    }
+  }
+
+  DateTime? _todayOccurrence(Reminder reminder, DateTime now) {
+    if (!reminder.enabled) return null;
+    final today = DateTime(now.year, now.month, now.day);
+    if (reminder.repeat == 'Once') {
+      final ms = reminder.announcementCount > 0 ? reminder.scheduledAt : null;
+      if (ms == null) return null; // Legacy Once reminders have unknown dates.
+      final scheduled = DateTime.fromMillisecondsSinceEpoch(ms);
+      if (scheduled.year != now.year ||
+          scheduled.month != now.month ||
+          scheduled.day != now.day) {
+        return null;
+      }
+      return scheduled;
+    }
+    if (reminder.repeat == 'Weekdays' &&
+        (now.weekday == DateTime.saturday || now.weekday == DateTime.sunday)) {
+      return null;
+    }
+    if (reminder.repeat != 'Daily' && reminder.repeat != 'Weekdays')
+    {
+      return null;
+    }
+    return DateTime(
+      today.year,
+      today.month,
+      today.day,
+      reminder.hour,
+      reminder.minute,
+    );
+  }
+
   late DateTime _liveNow;
   Timer? _clockTimer;
+  static const MethodChannel _reminderChannel = MethodChannel(
+    'com.example.myspeak/reminders',
+  );
+  bool? _exactAlarmAllowed;
+  bool _checkingAlarmPermission = false;
+
+  Future<bool> _refreshExactAlarmPermission() async {
+    if (_checkingAlarmPermission) return _exactAlarmAllowed == true;
+    _checkingAlarmPermission = true;
+    try {
+      final allowed =
+          await _reminderChannel.invokeMethod<bool>('canScheduleExactAlarms') ??
+          false;
+      if (mounted) setState(() => _exactAlarmAllowed = allowed);
+      return allowed;
+    } catch (error) {
+      debugPrint('MySpeak: exact alarm permission check failed: $error');
+      if (mounted) setState(() => _exactAlarmAllowed = false);
+      return false;
+    } finally {
+      _checkingAlarmPermission = false;
+    }
+  }
+
+  Future<void> _openAlarmPermissionSettings() async {
+    try {
+      await _reminderChannel.invokeMethod('openExactAlarmSettings');
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not open alarm settings: $error')),
+      );
+    }
+  }
+
+  Future<void> _showAlarmPermissionDialog() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Enable Alarms & reminders'),
+        content: const Text(
+          'MySpeak needs permission to schedule voice reminders at the '
+          'selected time. Enable Alarms & reminders in Android settings, '
+          'then return to MySpeak.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              _openAlarmPermissionSettings();
+            },
+            child: const Text('Open settings'),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   void initState() {
     super.initState();
     _liveNow = DateTime.now();
     WidgetsBinding.instance.addObserver(this);
+    _reloadReminders();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _refreshExactAlarmPermission();
+    });
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() {
         _liveNow = DateTime.now();
-        if (_liveNow.second == 0) _dashboardRefresh++;
       });
     });
   }
@@ -102,9 +237,10 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && mounted) {
+      _refreshExactAlarmPermission();
+      _reloadReminders();
       setState(() {
         _liveNow = DateTime.now();
-        _dashboardRefresh++;
       });
     }
   }
@@ -264,6 +400,31 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
       return;
     }
 
+    // Do not create a database record if Android cannot schedule the alarm.
+    if (!await _refreshExactAlarmPermission()) {
+      await _showAlarmPermissionDialog();
+      return;
+    }
+    if (!mounted) return;
+
+    final now = DateTime.now();
+    var scheduledTime = DateTime(
+      now.year,
+      now.month,
+      now.day,
+      _selectedTime.hour,
+      _selectedTime.minute,
+    );
+    if (!scheduledTime.isAfter(now)) {
+      scheduledTime = scheduledTime.add(const Duration(days: 1));
+    }
+    if (_repeat == 'Weekdays') {
+      while (scheduledTime.weekday == DateTime.saturday ||
+          scheduledTime.weekday == DateTime.sunday) {
+        scheduledTime = scheduledTime.add(const Duration(days: 1));
+      }
+    }
+
     final reminder = Reminder(
       message: message,
       speechMessage: approvedSpeechMessage,
@@ -273,34 +434,15 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
       repeat: _repeat,
       playbackMode: _playbackMode,
       announcementCount: _announcementCount,
+      scheduledAt: _repeat == 'Once'
+          ? scheduledTime.millisecondsSinceEpoch
+          : null,
     );
 
     try {
       final id = await ReminderDatabase.instance.insertReminder(reminder);
 
       if (_repeat == 'Once' || _repeat == 'Daily' || _repeat == 'Weekdays') {
-        final now = DateTime.now();
-
-        var scheduledTime = DateTime(
-          now.year,
-          now.month,
-          now.day,
-          _selectedTime.hour,
-          _selectedTime.minute,
-        );
-
-        // A one-time reminder must be scheduled in the future.
-        // If today's selected time has passed, use tomorrow.
-        if (!scheduledTime.isAfter(now)) {
-          scheduledTime = scheduledTime.add(const Duration(days: 1));
-        }
-        if (_repeat == 'Weekdays') {
-          while (scheduledTime.weekday == DateTime.saturday ||
-              scheduledTime.weekday == DateTime.sunday) {
-            scheduledTime = scheduledTime.add(const Duration(days: 1));
-          }
-        }
-
         try {
           await _scheduleSavedReminder(
             reminderId: id,
@@ -340,15 +482,7 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
         SnackBar(content: Text('Reminder #$id saved successfully!')),
       );
 
-      _messageController.clear();
-      setState(() => _dashboardRefresh++);
-      _translationController.clear();
-
-      setState(() {
-        _translatedMessage = null;
-        _translationSourceMessage = null;
-        _translationTargetLanguage = null;
-      });
+      _resetReminderForm();
     } catch (error) {
       if (!mounted) return;
 
@@ -486,43 +620,12 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
   static const _gold = Color(0xFFF2B960);
   static const _background = Color(0xFFF5F7FC);
 
-  DateTime _nextOccurrence(Reminder reminder, DateTime now) {
-    var candidate = DateTime(
-      now.year,
-      now.month,
-      now.day,
-      reminder.hour,
-      reminder.minute,
-    );
-    if (!candidate.isAfter(now)) {
-      candidate = candidate.add(const Duration(days: 1));
-    }
-    if (reminder.repeat == 'Weekdays') {
-      while (candidate.weekday == DateTime.saturday ||
-          candidate.weekday == DateTime.sunday) {
-        candidate = candidate.add(const Duration(days: 1));
-      }
-    }
-    return candidate;
-  }
-
-  Future<Reminder?> _loadNextReminder() async {
-    final reminders = await ReminderDatabase.instance.getReminders();
-    final active = reminders.where((r) => r.enabled).toList();
-    if (active.isEmpty) return null;
-    final now = DateTime.now();
-    active.sort(
-      (a, b) => _nextOccurrence(a, now).compareTo(_nextOccurrence(b, now)),
-    );
-    return active.first;
-  }
-
   Future<void> _openSaved() async {
     await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const SavedRemindersScreen()),
     );
-    if (mounted) setState(() => _dashboardRefresh++);
+    if (mounted) await _reloadReminders();
   }
 
   Widget _sectionTitle(IconData icon, String title) {
@@ -750,7 +853,7 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
                         const Spacer(),
                         IconButton(
                           tooltip: 'Refresh next reminder',
-                          onPressed: () => setState(() => _dashboardRefresh++),
+                          onPressed: _reloadReminders,
                           icon: const Icon(
                             Icons.refresh,
                             color: Colors.white70,
@@ -759,73 +862,92 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
                         ),
                       ],
                     ),
-                    FutureBuilder<Reminder?>(
-                      key: ValueKey(_dashboardRefresh),
-                      future: _loadNextReminder(),
-                      builder: (context, snapshot) {
-                        if (snapshot.hasError) {
+                    Builder(
+                      builder: (context) {
+                        if (!_remindersLoaded) {
+                          return const Text(
+                            'Loading reminders...',
+                            style: TextStyle(color: Colors.white),
+                          );
+                        }
+                        if (_remindersLoadError != null) {
                           return const Text(
                             'Unable to load reminders',
                             style: TextStyle(color: Colors.white),
                           );
                         }
-                        if (!snapshot.hasData) {
-                          return Text(
-                            snapshot.connectionState == ConnectionState.waiting
-                                ? 'Loading your reminders...'
-                                : 'No upcoming reminders yet',
-                            style: const TextStyle(
-                              fontSize: 18,
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
-                            ),
+                        final today = <(Reminder, DateTime)>[];
+                        for (final reminder in _cachedReminders) {
+                          final scheduled = _todayOccurrence(
+                            reminder,
+                            _liveNow,
                           );
+                          if (scheduled != null)
+                            {
+                            today.add((reminder, scheduled));
+                            }
                         }
-                        final reminder = snapshot.data!;
-                        final next = _nextOccurrence(reminder, DateTime.now());
-                        final time = TimeOfDay(
-                          hour: reminder.hour,
-                          minute: reminder.minute,
-                        ).format(context);
-                        final today = DateTime.now();
-                        final isToday =
-                            next.year == today.year &&
-                            next.month == today.month &&
-                            next.day == today.day;
+                        today.sort((a, b) => a.$2.compareTo(b.$2));
+                        final upcoming = today
+                            .where((item) => item.$2.isAfter(_liveNow))
+                            .toList();
+                        final total = today.length;
+                        final remaining = upcoming.length;
+                        final passed = total - remaining;
+                        final next = upcoming.isEmpty ? null : upcoming.first;
                         return Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const SizedBox(height: 8),
-                            Text(
-                              time,
-                              style: const TextStyle(
-                                fontSize: 28,
-                                fontWeight: FontWeight.w800,
-                                color: Colors.white,
-                              ),
-                            ),
-                            const SizedBox(height: 5),
-                            Text(
-                              reminder.message,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 15,
-                                color: Color(0xFFE2E9FA),
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                _darkChip(
-                                  isToday
-                                      ? 'Today'
-                                      : '${next.day}/${next.month}',
+                            if (next == null)
+                              Text(
+                                total == 0
+                                    ? 'No reminders for today'
+                                    : 'No reminders remaining today',
+                                style: const TextStyle(
+                                  fontSize: 18,
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
                                 ),
-                                _darkChip(reminder.language),
-                                _darkChip(reminder.repeat),
+                              )
+                            else ...[
+                              Text(
+                                TimeOfDay.fromDateTime(next.$2).format(context),
+                                style: const TextStyle(
+                                  fontSize: 28,
+                                  fontWeight: FontWeight.w800,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              const SizedBox(height: 5),
+                              Text(
+                                next.$1.message,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  color: Color(0xFFE2E9FA),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  _darkChip('Today'),
+                                  _darkChip(next.$1.language),
+                                  _darkChip(next.$1.repeat),
+                                ],
+                              ),
+                            ],
+                            const SizedBox(height: 16),
+                            const Divider(color: Colors.white24),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                _dashboardMetric('Total today', total),
+                                _dashboardMetric('Time passed', passed),
+                                _dashboardMetric('Remaining', remaining),
                               ],
                             ),
                           ],
@@ -846,226 +968,282 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
                 ),
               ),
               const SizedBox(height: 16),
-              _sectionTitle(Icons.add_circle_outline, 'Create a reminder'),
-              const SizedBox(height: 12),
-              _panel(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const Text(
-                      'What would you like to hear?',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w700,
-                        color: _navy,
-                        fontSize: 14,
+              if (_exactAlarmAllowed == false) ...[
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF4DE),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Alarms & reminders permission is off',
+                        style: TextStyle(fontWeight: FontWeight.w700),
                       ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _messageController,
-                      maxLines: 3,
-                      decoration: InputDecoration(
-                        hintText: 'e.g. It is time for your medicine',
-                        hintStyle: const TextStyle(
-                          color: Color(0xFF9AA5B6),
-                          fontSize: 14,
-                        ),
-                        filled: true,
-                        fillColor: _background,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(15),
-                          borderSide: BorderSide.none,
-                        ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Enable it so MySpeak can announce reminders on time.',
                       ),
-                    ),
-                    const SizedBox(height: 17),
-                    InkWell(
-                      onTap: _selectTime,
-                      borderRadius: BorderRadius.circular(16),
-                      child: Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFF0F2FF),
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.schedule_rounded,
-                              color: _accent,
-                              size: 27,
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text(
-                                    'Reminder time',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: Color(0xFF71809A),
-                                    ),
-                                  ),
-                                  Text(
-                                    _selectedTime.format(context),
-                                    style: const TextStyle(
-                                      fontSize: 22,
-                                      fontWeight: FontWeight.w800,
-                                      color: _navy,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const Icon(
-                              Icons.edit_outlined,
-                              color: _accent,
-                              size: 20,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    const Text(
-                      'Voice preferences',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700,
-                        color: _navy,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    LayoutBuilder(
-                      builder: (context, constraints) {
-                        final width = (constraints.maxWidth - 10) / 2;
-                        return Wrap(
-                          spacing: 10,
-                          runSpacing: 10,
-                          children: [
-                            SizedBox(
-                              width: width,
-                              child: _settingDropdown<String>(
-                                label: 'Language',
-                                icon: Icons.language,
-                                value: _selectedLanguage,
-                                values: const ['English', 'Telugu', 'Hindi'],
-                                text: (v) => v,
-                                onChanged: (value) {
-                                  if (value != null &&
-                                      value != _selectedLanguage) {
-                                    setState(() {
-                                      _selectedLanguage = value;
-                                      _translatedMessage = null;
-                                      _translationSourceMessage = null;
-                                      _translationTargetLanguage = null;
-                                      _translationController.clear();
-                                    });
-                                  }
-                                },
-                              ),
-                            ),
-                            SizedBox(
-                              width: width,
-                              child: _settingDropdown<String>(
-                                label: 'Repeat',
-                                icon: Icons.repeat,
-                                value: _repeat,
-                                values: const ['Once', 'Daily', 'Weekdays'],
-                                text: (v) => v,
-                                onChanged: (v) {
-                                  if (v != null) setState(() => _repeat = v);
-                                },
-                              ),
-                            ),
-                            SizedBox(
-                              width: width,
-                              child: _settingDropdown<String>(
-                                label: 'Playback',
-                                icon: Icons.volume_up_outlined,
-                                value: _playbackMode,
-                                values: const [
-                                  'Automatic Voice',
-                                  'Notification First',
-                                ],
-                                text: (v) => v,
-                                onChanged: (v) {
-                                  if (v != null) {
-                                    setState(() => _playbackMode = v);
-                                  }
-                                },
-                              ),
-                            ),
-                            SizedBox(
-                              width: width,
-                              child: _settingDropdown<int>(
-                                label: 'Announcements',
-                                icon: Icons.record_voice_over,
-                                value: _announcementCount,
-                                values: const [1, 2, 3, 4],
-                                text: (v) => '$v ${v == 1 ? 'time' : 'times'}',
-                                onChanged: (v) {
-                                  if (v != null) {
-                                    setState(() => _announcementCount = v);
-                                  }
-                                },
-                              ),
-                            ),
-                          ],
-                        );
-                      },
-                    ),
-                    if (_selectedLanguage != 'English') ...[
-                      const SizedBox(height: 16),
-                      OutlinedButton.icon(
-                        onPressed: _isTranslating ? null : _translateMessage,
-                        icon: const Icon(Icons.translate),
-                        label: Text(
-                          _isTranslating
-                              ? 'Translating...'
-                              : 'Translate & Review',
-                        ),
+                      TextButton.icon(
+                        onPressed: _showAlarmPermissionDialog,
+                        icon: const Icon(Icons.settings_outlined),
+                        label: const Text('Enable permission'),
                       ),
                     ],
-                    if (_translatedMessage != null &&
-                        _selectedLanguage != 'English') ...[
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: _translationController,
-                        maxLines: 3,
-                        decoration: InputDecoration(
-                          labelText: 'Translated reminder (editable)',
-                          helperText: 'Review the spoken text before saving',
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                const SizedBox(height: 14),
+              ],
+              _sectionTitle(Icons.add_circle_outline, 'Create a reminder'),
+              if (_exactAlarmAllowed != true)
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Text(
+                    'Enable Alarms & reminders permission to create reminders.',
+                    style: TextStyle(color: Color(0xFF9C6222)),
+                  ),
+                ),
+              const SizedBox(height: 12),
+              IgnorePointer(
+                ignoring: _exactAlarmAllowed != true,
+                child: Opacity(
+                  opacity: _exactAlarmAllowed == true ? 1 : 0.55,
+                  child: _panel(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Text(
+                          'What would you like to hear?',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w700,
+                            color: _navy,
+                            fontSize: 14,
                           ),
                         ),
-                      ),
-                    ],
-                    const SizedBox(height: 18),
-                    OutlinedButton.icon(
-                      onPressed: _previewVoice,
-                      icon: const Icon(Icons.play_circle_outline),
-                      label: const Text('Preview voice'),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    FilledButton.icon(
-                      onPressed: _saveReminder,
-                      icon: const Icon(Icons.check_circle_outline),
-                      label: const Text('Save reminder'),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: _accent,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: _messageController,
+                          maxLines: 3,
+                          decoration: InputDecoration(
+                            hintText: 'e.g. It is time for your medicine',
+                            hintStyle: const TextStyle(
+                              color: Color(0xFF9AA5B6),
+                              fontSize: 14,
+                            ),
+                            filled: true,
+                            fillColor: _background,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(15),
+                              borderSide: BorderSide.none,
+                            ),
+                          ),
                         ),
-                      ),
+                        const SizedBox(height: 17),
+                        InkWell(
+                          onTap: _selectTime,
+                          borderRadius: BorderRadius.circular(16),
+                          child: Container(
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF0F2FF),
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.schedule_rounded,
+                                  color: _accent,
+                                  size: 27,
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      const Text(
+                                        'Reminder time',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: Color(0xFF71809A),
+                                        ),
+                                      ),
+                                      Text(
+                                        _selectedTime.format(context),
+                                        style: const TextStyle(
+                                          fontSize: 22,
+                                          fontWeight: FontWeight.w800,
+                                          color: _navy,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const Icon(
+                                  Icons.edit_outlined,
+                                  color: _accent,
+                                  size: 20,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        const Text(
+                          'Voice preferences',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: _navy,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            final width = (constraints.maxWidth - 10) / 2;
+                            return Wrap(
+                              spacing: 10,
+                              runSpacing: 10,
+                              children: [
+                                SizedBox(
+                                  width: width,
+                                  child: _settingDropdown<String>(
+                                    label: 'Language',
+                                    icon: Icons.language,
+                                    value: _selectedLanguage,
+                                    values: const [
+                                      'English',
+                                      'Telugu',
+                                      'Hindi',
+                                    ],
+                                    text: (v) => v,
+                                    onChanged: (value) {
+                                      if (value != null &&
+                                          value != _selectedLanguage) {
+                                        setState(() {
+                                          _selectedLanguage = value;
+                                          _translatedMessage = null;
+                                          _translationSourceMessage = null;
+                                          _translationTargetLanguage = null;
+                                          _translationController.clear();
+                                        });
+                                      }
+                                    },
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: width,
+                                  child: _settingDropdown<String>(
+                                    label: 'Repeat',
+                                    icon: Icons.repeat,
+                                    value: _repeat,
+                                    values: const ['Once', 'Daily', 'Weekdays'],
+                                    text: (v) => v,
+                                    onChanged: (v) {
+                                      if (v != null)
+                                      {
+                                        setState(() => _repeat = v);
+                                      }
+                                    },
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: width,
+                                  child: _settingDropdown<String>(
+                                    label: 'Playback',
+                                    icon: Icons.volume_up_outlined,
+                                    value: _playbackMode,
+                                    values: const [
+                                      'Automatic Voice',
+                                      'Notification First',
+                                    ],
+                                    text: (v) => v,
+                                    onChanged: (v) {
+                                      if (v != null) {
+                                        setState(() => _playbackMode = v);
+                                      }
+                                    },
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: width,
+                                  child: _settingDropdown<int>(
+                                    label: 'Announcements',
+                                    icon: Icons.record_voice_over,
+                                    value: _announcementCount,
+                                    values: const [1, 2, 3, 4],
+                                    text: (v) =>
+                                        '$v ${v == 1 ? 'time' : 'times'}',
+                                    onChanged: (v) {
+                                      if (v != null) {
+                                        setState(() => _announcementCount = v);
+                                      }
+                                    },
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                        if (_selectedLanguage != 'English') ...[
+                          const SizedBox(height: 16),
+                          OutlinedButton.icon(
+                            onPressed: _isTranslating
+                                ? null
+                                : _translateMessage,
+                            icon: const Icon(Icons.translate),
+                            label: Text(
+                              _isTranslating
+                                  ? 'Translating...'
+                                  : 'Translate & Review',
+                            ),
+                          ),
+                        ],
+                        if (_translatedMessage != null &&
+                            _selectedLanguage != 'English') ...[
+                          const SizedBox(height: 10),
+                          TextField(
+                            controller: _translationController,
+                            maxLines: 3,
+                            decoration: InputDecoration(
+                              labelText: 'Translated reminder (editable)',
+                              helperText:
+                                  'Review the spoken text before saving',
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 18),
+                        OutlinedButton.icon(
+                          onPressed: _previewVoice,
+                          icon: const Icon(Icons.play_circle_outline),
+                          label: const Text('Preview voice'),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        FilledButton.icon(
+                          onPressed: _exactAlarmAllowed == true
+                              ? _saveReminder
+                              : null,
+                          icon: const Icon(Icons.check_circle_outline),
+                          label: const Text('Save reminder'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: _accent,
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
               ),
               if (kDebugMode) ...[
@@ -1115,6 +1293,26 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
           if (index == 1) _openSaved();
         },
       ),
+    );
+  }
+
+  Widget _dashboardMetric(String label, int count) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '$count',
+          style: const TextStyle(
+            fontSize: 21,
+            fontWeight: FontWeight.w800,
+            color: Colors.white,
+          ),
+        ),
+        Text(
+          label,
+          style: const TextStyle(fontSize: 11, color: Color(0xFFD7E2FF)),
+        ),
+      ],
     );
   }
 
