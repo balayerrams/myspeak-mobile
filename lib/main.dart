@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -27,7 +28,7 @@ class PersonalVoiceReminderApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'MySpeak',
+      title: 'iSpeak',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
@@ -67,6 +68,100 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
   final TextEditingController _translationController = TextEditingController();
 
   final FlutterTts _flutterTts = FlutterTts();
+  final stt.SpeechToText _speech = stt.SpeechToText();
+  bool _isListening = false;
+  bool _startingSpeech = false;
+  String? _speechStatus;
+
+  Future<void> _toggleSpeechInput() async {
+    if (_startingSpeech) return;
+    if (_isListening) {
+      await _speech.stop();
+      if (mounted) setState(() => _isListening = false);
+      return;
+    }
+
+    setState(() {
+      _startingSpeech = true;
+      _speechStatus = null;
+    });
+    try {
+      final available = await _speech.initialize(
+        onStatus: (status) {
+          if (!mounted) return;
+          setState(() {
+            _isListening = status == 'listening';
+            if (status == 'notListening' || status == 'done') {
+              _isListening = false;
+            }
+          });
+        },
+        onError: (error) {
+          if (!mounted) return;
+          setState(() {
+            _isListening = false;
+            _speechStatus = 'Speech recognition: ${error.errorMsg}';
+          });
+        },
+      );
+      if (!mounted) return;
+      if (!available) {
+        setState(
+          () => _speechStatus =
+              'Speech recognition is unavailable. Check microphone permission and device speech services.',
+        );
+        return;
+      }
+      final preferredLocale = switch (_selectedLanguage) {
+        'Telugu' => 'te_IN',
+        'Hindi' => 'hi_IN',
+        _ => 'en_IN',
+      };
+      final locales = await _speech.locales();
+      if (!mounted) return;
+      final supported = locales
+          .where(
+            (locale) =>
+                locale.localeId.toLowerCase().replaceAll('-', '_') ==
+                preferredLocale.toLowerCase(),
+          )
+          .toList();
+      if (supported.isEmpty) {
+        setState(
+          () => _speechStatus =
+              '$_selectedLanguage speech recognition is not installed on this device.',
+        );
+        return;
+      }
+      await _speech.listen(
+      listenOptions: stt.SpeechListenOptions(
+        localeId: supported.first.localeId,
+      ),
+      onResult: (result) {
+          if (!mounted) return;
+          _messageController.text = result.recognizedWords;
+          _messageController.selection = TextSelection.collapsed(
+            offset: _messageController.text.length,
+          );
+          setState(() {
+            _translatedMessage = null;
+            _translationSourceMessage = null;
+            _translationTargetLanguage = null;
+            _translationController.clear();
+          });
+        },
+      );
+      if (mounted) {
+        setState(() => _isListening = _speech.isListening);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _speechStatus = 'Unable to start microphone: $error');
+      }
+    } finally {
+      if (mounted) setState(() => _startingSpeech = false);
+    }
+  }
 
   bool get _hasValidTranslation {
     return !_isTranslating &&
@@ -85,23 +180,25 @@ class _CreateReminderScreenState extends State<CreateReminderScreen>
   bool _remindersLoaded = false;
   String? _remindersLoadError;
 
-  
-void _resetReminderForm() {
-  _messageController.clear();
-  _translationController.clear();
+  void _resetReminderForm() {
+    unawaited(_speech.stop());
+    _messageController.clear();
+    _translationController.clear();
 
-  setState(() {
-    _selectedTime = TimeOfDay.now();
-    _selectedLanguage = 'English';
-    _repeat = 'Daily';
-    _playbackMode = 'Automatic Voice';
-    _announcementCount = 1;
+    setState(() {
+      _selectedTime = TimeOfDay.now();
+      _selectedLanguage = 'English';
+      _repeat = 'Daily';
+      _playbackMode = 'Automatic Voice';
+      _announcementCount = 1;
+      _isListening = false;
+      _speechStatus = null;
 
-    _translatedMessage = null;
-    _translationSourceMessage = null;
-    _translationTargetLanguage = null;
-  });
-}
+      _translatedMessage = null;
+      _translationSourceMessage = null;
+      _translationTargetLanguage = null;
+    });
+  }
 
   Future<void> _reloadReminders() async {
     try {
@@ -139,8 +236,7 @@ void _resetReminderForm() {
         (now.weekday == DateTime.saturday || now.weekday == DateTime.sunday)) {
       return null;
     }
-    if (reminder.repeat != 'Daily' && reminder.repeat != 'Weekdays')
-    {
+    if (reminder.repeat != 'Daily' && reminder.repeat != 'Weekdays') {
       return null;
     }
     return DateTime(
@@ -483,6 +579,7 @@ void _resetReminderForm() {
       );
 
       _resetReminderForm();
+      await _reloadReminders();
     } catch (error) {
       if (!mounted) return;
 
@@ -608,6 +705,7 @@ void _resetReminderForm() {
   @override
   void dispose() {
     _clockTimer?.cancel();
+    unawaited(_speech.cancel());
     WidgetsBinding.instance.removeObserver(this);
     _flutterTts.stop();
     _messageController.dispose();
@@ -755,7 +853,7 @@ void _resetReminderForm() {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'MySpeak',
+                          'iSpeak',
                           style: TextStyle(
                             fontSize: 25,
                             fontWeight: FontWeight.w800,
@@ -882,10 +980,9 @@ void _resetReminderForm() {
                             reminder,
                             _liveNow,
                           );
-                          if (scheduled != null)
-                            {
+                          if (scheduled != null) {
                             today.add((reminder, scheduled));
-                            }
+                          }
                         }
                         today.sort((a, b) => a.$2.compareTo(b.$2));
                         final upcoming = today
@@ -1040,6 +1137,46 @@ void _resetReminderForm() {
                             ),
                           ),
                         ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: _startingSpeech
+                                  ? null
+                                  : _toggleSpeechInput,
+                              icon: Icon(
+                                _isListening
+                                    ? Icons.stop_circle_outlined
+                                    : Icons.mic_none_rounded,
+                              ),
+                              label: Text(
+                                _startingSpeech
+                                    ? 'Starting...'
+                                    : _isListening
+                                    ? 'Stop listening'
+                                    : 'Speak reminder',
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            if (_isListening)
+                              const Expanded(
+                                child: Text(
+                                  'Listening...',
+                                  style: TextStyle(color: _accent),
+                                ),
+                              ),
+                          ],
+                        ),
+                        if (_speechStatus != null) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            _speechStatus!,
+                            style: const TextStyle(
+                              color: Color(0xFF9C6222),
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 17),
                         InkWell(
                           onTap: _selectTime,
@@ -1142,8 +1279,7 @@ void _resetReminderForm() {
                                     values: const ['Once', 'Daily', 'Weekdays'],
                                     text: (v) => v,
                                     onChanged: (v) {
-                                      if (v != null)
-                                      {
+                                      if (v != null) {
                                         setState(() => _repeat = v);
                                       }
                                     },
